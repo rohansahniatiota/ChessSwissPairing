@@ -22,21 +22,41 @@ st.title("♟ Swiss Chess Tournament Manager (Professional)")
 # ==========================================================
 # DATABASE HELPERS
 # ==========================================================
-def get_or_create_tournament(name):
+def get_or_create_tournament(name, tdate):
     with engine.begin() as conn:
         t = conn.execute(
-            text("SELECT id FROM tournaments WHERE name=:n"),
+            text("""
+                SELECT id, tournament_date
+                FROM tournaments
+                WHERE name=:n
+            """),
             {"n": name},
         ).fetchone()
 
         if t:
+            # Update date if changed
+            if t.tournament_date != tdate:
+                conn.execute(
+                    text("""
+                        UPDATE tournaments
+                        SET tournament_date=:d
+                        WHERE id=:i
+                    """),
+                    {"d": tdate, "i": t.id},
+                )
             return t.id
 
         tid = conn.execute(
-            text("INSERT INTO tournaments (name) VALUES (:n) RETURNING id"),
-            {"n": name},
+            text("""
+                INSERT INTO tournaments (name, tournament_date)
+                VALUES (:n, :d)
+                RETURNING id
+            """),
+            {"n": name, "d": tdate},
         ).scalar()
+
         return tid
+
 
 
 def load_players(tid):
@@ -165,7 +185,14 @@ tabs = st.tabs(["Players", "Rounds", "Standings"])
 # ---------------- PLAYERS ----------------
 with tabs[0]:
     tname = st.text_input("Tournament Name", "Untitled Tournament")
-    tid = get_or_create_tournament(tname)
+
+    tdate = st.date_input(
+        "Tournament Date",
+        help="Start date of the tournament"
+    )
+    
+    tid = get_or_create_tournament(tname, tdate)
+
 
     st.subheader("Add Player")
     c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
@@ -247,6 +274,21 @@ with tabs[1]:
 
 # ---------------- STANDINGS ----------------
 with tabs[2]:
+    with engine.connect() as conn:
+        tinfo = conn.execute(
+            text("""
+                SELECT name, tournament_date
+                FROM tournaments
+                WHERE id=:t
+            """),
+            {"t": tid},
+        ).fetchone()
+    
+    if tinfo:
+        st.markdown(
+            f"### {tinfo.name}  \n📅 {tinfo.tournament_date}"
+        )
+
     players = load_players(tid)
     games = load_games(tid)
 
