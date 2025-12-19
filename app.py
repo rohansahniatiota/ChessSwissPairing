@@ -34,33 +34,46 @@ def add_player(name, rating):
         "score": 0.0,
         "colors": [],
         "opponents": [],
-        "bye": False,
-        "results": {}
+        "results": {},
+        "bye": False
     }
 
 
+
 def standings():
+    if not st.session_state.players:
+        return pd.DataFrame(
+            columns=["name", "rating", "score", "buchholz", "sonneborn"]
+        )
+
     df = pd.DataFrame(st.session_state.players.values())
 
+    # ---- SAFETY DEFAULTS ----
+    if "opponents" not in df.columns:
+        df["opponents"] = [[] for _ in range(len(df))]
+    if "results" not in df.columns:
+        df["results"] = [{} for _ in range(len(df))]
+
+    # ---- BUCHHOLZ ----
     df["buchholz"] = df["opponents"].apply(
-        lambda ops: sum(st.session_state.players[o]["score"] for o in ops)
-    )
-
-    df["sonneborn"] = df.apply(
-        lambda r: sum(
+        lambda ops: sum(
             st.session_state.players[o]["score"]
-            * (1 if r["results"].get(o) == 1 else 0.5 if r["results"].get(o) == 0.5 else 0)
-            for o in r["opponents"]
-        ),
-        axis=1
+            for o in ops
+            if o in st.session_state.players
+        )
     )
 
-    df["progressive"] = df["score"]
+    # ---- SONNEBORN-BERGER ----
+    def sonneborn(row):
+        total = 0
+        for opp_id, res in row["results"].items():
+            if opp_id in st.session_state.players:
+                total += st.session_state.players[opp_id]["score"] * res
+        return total
+
+    df["sonneborn"] = df.apply(sonneborn, axis=1)
 
     return df.sort_values(
-        by=["score", "buchholz", "sonneborn", "rating"],
-        ascending=False
-    )
 
 
 def choose_colors(p1, p2):
@@ -193,10 +206,14 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Standings")
     df = standings()
-    st.dataframe(
-        df[["name", "rating", "score", "buchholz", "sonneborn"]],
-        use_container_width=True
-    )
+    if df.empty:
+        st.info("No rounds played yet.")
+    else:
+        st.dataframe(
+            df[["name", "rating", "score", "buchholz", "sonneborn"]],
+            use_container_width=True
+        )
+
 
     csv = df.to_csv(index=False).encode()
     st.download_button("Export Standings CSV", csv, "standings.csv")
