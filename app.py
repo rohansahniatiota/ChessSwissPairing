@@ -244,6 +244,9 @@ with tabs[2]:
             ],
             use_container_width=True
         )
+        csv = final_df.to_csv(index=False).encode()
+        st.download_button("Export Standings CSV", csv, "standings.csv")
+
 
     # df = standings()
     # if df.empty:
@@ -255,9 +258,7 @@ with tabs[2]:
     #     )
 
 
-    csv = df.to_csv(index=False).encode()
-    st.download_button("Export Standings CSV", csv, "standings.csv")
-
+    
 # ---------------- Save / Load ----------------
 with tabs[3]:
     st.subheader("Save / Load Tournament")
