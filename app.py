@@ -5,6 +5,11 @@ from collections import defaultdict
 from itertools import combinations
 
 st.set_page_config("Swiss Chess Tournament Manager", layout="wide")
+if "tournament" not in st.session_state:
+    st.session_state.tournament = {
+        "name": "Untitled Tournament",
+        "rounds": 0
+    }
 
 # ==========================================================
 # Session State
@@ -25,12 +30,14 @@ if "round_number" not in st.session_state:
 # ==========================================================
 # Core Helpers
 # ==========================================================
-def add_player(name, rating):
+def add_player(name, rating, gender, age):
     pid = len(st.session_state.players) + 1
     st.session_state.players[pid] = {
         "id": pid,
         "name": name,
         "rating": rating,
+        "gender": gender,
+        "age": age,
         "score": 0.0,
         "colors": [],
         "opponents": [],
@@ -40,54 +47,61 @@ def add_player(name, rating):
 
 
 
-def standings():
-    if not st.session_state.players:
-        return pd.DataFrame(
-            columns=["name", "rating", "score", "buchholz", "sonneborn"]
-        )
-
+def standings(final=False):
     df = pd.DataFrame(st.session_state.players.values())
 
-    # ---- SAFETY DEFAULTS ----
-    if "opponents" not in df.columns:
-        df["opponents"] = [[] for _ in range(len(df))]
-    if "results" not in df.columns:
-        df["results"] = [{} for _ in range(len(df))]
+    if df.empty:
+        return df
 
-    # ---- BUCHHOLZ ----
     df["buchholz"] = df["opponents"].apply(
-        lambda ops: sum(
-            st.session_state.players[o]["score"]
-            for o in ops
-            if o in st.session_state.players
-        )
+        lambda ops: sum(st.session_state.players[o]["score"] for o in ops)
     )
 
-    # ---- SONNEBORN-BERGER ----
-    def sonneborn(row):
-        total = 0
-        for opp_id, res in row["results"].items():
-            if opp_id in st.session_state.players:
-                total += st.session_state.players[opp_id]["score"] * res
-        return total
+    df["sonneborn"] = df.apply(
+        lambda r: sum(
+            st.session_state.players[o]["score"] * r["results"].get(o, 0)
+            for o in r["opponents"]
+        ),
+        axis=1
+    )
 
-    df["sonneborn"] = df.apply(sonneborn, axis=1)
+    # Direct encounter
+    def direct(row):
+        score = 0
+        for o, r in row["results"].items():
+            score += r
+        return score
+
+    df["direct"] = df.apply(direct, axis=1)
+
+    order = ["score", "buchholz", "sonneborn"]
+    if final:
+        order.append("direct")
+    order.append("rating")
 
     return df.sort_values(
-        by=["score", "buchholz", "sonneborn", "rating"],
+        by=order,
         ascending=False
     ).reset_index(drop=True)
 
 
+
 def choose_colors(p1, p2):
+    # HARD CHECK: no repeat pairing
+    if p2 in st.session_state.players[p1]["opponents"]:
+        raise ValueError("Repeat pairing detected")
+
     c1 = st.session_state.players[p1]["colors"]
     c2 = st.session_state.players[p2]["colors"]
 
+    # Balance colors
     if c1.count("W") > c1.count("B"):
         return p2, p1
     if c2.count("W") > c2.count("B"):
         return p1, p2
+
     return p1, p2
+
 
 
 def swiss_pair():
@@ -95,9 +109,7 @@ def swiss_pair():
     unpaired = players_sorted.copy()
     pairings = []
 
-    # ---------------------------
-    # BYE HANDLING
-    # ---------------------------
+    # ---------------- BYE ----------------
     if len(unpaired) % 2 == 1:
         for pid in reversed(unpaired):
             if not st.session_state.players[pid]["bye"]:
@@ -107,28 +119,24 @@ def swiss_pair():
                 unpaired.remove(pid)
                 break
 
-    # ---------------------------
-    # MAIN PAIRING LOOP
-    # ---------------------------
+    # ---------------- PAIRING ----------------
     while len(unpaired) >= 2:
         p1 = unpaired.pop(0)
-        paired = False
+        found = False
 
         for p2 in unpaired:
             if p2 not in st.session_state.players[p1]["opponents"]:
                 w, b = choose_colors(p1, p2)
                 pairings.append((w, b))
                 unpaired.remove(p2)
-                paired = True
+                found = True
                 break
 
-        # ---------------------------
-        # DEADLOCK RECOVERY (FORCE PAIR)
-        # ---------------------------
-        if not paired:
-            p2 = unpaired.pop(0)
-            w, b = choose_colors(p1, p2)
-            pairings.append((w, b))
+        # FORCE PAIR ONLY IF NO REPEAT EXISTS
+        if not found:
+            raise RuntimeError(
+                f"No valid pairing possible for {st.session_state.players[p1]['name']}"
+            )
 
     return pairings
 
@@ -169,21 +177,33 @@ tabs = st.tabs(["Players", "Rounds", "Standings", "Save / Load"])
 
 # ---------------- Players ----------------
 with tabs[0]:
-    st.subheader("Add Players")
-    c1, c2, c3 = st.columns([4, 2, 1])
-    name = c1.text_input("Player Name")
+    st.subheader("Tournament Details")
+    st.session_state.tournament["name"] = st.text_input(
+        "Tournament Name",
+        st.session_state.tournament["name"]
+    )
+
+    st.divider()
+    st.subheader("Add Player")
+
+    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
+    name = c1.text_input("Name")
     rating = c2.number_input("Rating", 0, 3000, 1200)
-    if c3.button("Add"):
+    gender = c3.selectbox("Gender", ["Male", "Female", "Other"])
+    age = c4.number_input("Age", 5, 100, 18)
+
+    if c5.button("Add"):
         if name:
-            add_player(name, rating)
+            add_player(name, rating, gender, age)
 
     if st.session_state.players:
         st.dataframe(
             pd.DataFrame(st.session_state.players.values())[
-                ["id", "name", "rating", "score"]
+                ["name", "rating", "gender", "age", "score"]
             ],
             use_container_width=True
         )
+
 
 # ---------------- Rounds ----------------
 with tabs[1]:
@@ -215,14 +235,24 @@ with tabs[1]:
 # ---------------- Standings ----------------
 with tabs[2]:
     st.subheader("Standings")
-    df = standings()
-    if df.empty:
-        st.info("No rounds played yet.")
-    else:
+    if st.button("Finalize Tournament"):
+        st.success("Final standings calculated with tie-breaks")
+        final_df = standings(final=True)
         st.dataframe(
-            df[["name", "rating", "score", "buchholz", "sonneborn"]],
+            final_df[
+                ["name", "rating", "gender", "age", "score", "buchholz", "sonneborn"]
+            ],
             use_container_width=True
         )
+
+    # df = standings()
+    # if df.empty:
+    #     st.info("No rounds played yet.")
+    # else:
+    #     st.dataframe(
+    #         df[["name", "rating", "score", "buchholz", "sonneborn"]],
+    #         use_container_width=True
+    #     )
 
 
     csv = df.to_csv(index=False).encode()
