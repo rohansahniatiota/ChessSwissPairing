@@ -91,40 +91,47 @@ def choose_colors(p1, p2):
 
 
 def swiss_pair():
-    players = standings()["id"].tolist()
-    used = set()
+    players_sorted = standings()["id"].tolist()
+    unpaired = players_sorted.copy()
     pairings = []
 
-    # Bye handling
-    if len(players) % 2 == 1:
-        for pid in reversed(players):
-            p = st.session_state.players[pid]
-            if not p["bye"]:
-                p["score"] += 1
-                p["bye"] = True
+    # ---------------------------
+    # BYE HANDLING
+    # ---------------------------
+    if len(unpaired) % 2 == 1:
+        for pid in reversed(unpaired):
+            if not st.session_state.players[pid]["bye"]:
+                st.session_state.players[pid]["bye"] = True
+                st.session_state.players[pid]["score"] += 1
                 pairings.append((pid, None))
-                used.add(pid)
+                unpaired.remove(pid)
                 break
 
-    # Score groups
-    score_groups = defaultdict(list)
-    for pid in players:
-        if pid not in used:
-            score_groups[st.session_state.players[pid]["score"]].append(pid)
+    # ---------------------------
+    # MAIN PAIRING LOOP
+    # ---------------------------
+    while len(unpaired) >= 2:
+        p1 = unpaired.pop(0)
+        paired = False
 
-    for score in sorted(score_groups.keys(), reverse=True):
-        group = score_groups[score]
-        while len(group) >= 2:
-            p1 = group.pop(0)
-            for p2 in group:
-                if p2 not in st.session_state.players[p1]["opponents"]:
-                    w, b = choose_colors(p1, p2)
-                    pairings.append((w, b))
-                    group.remove(p2)
-                    used.update({p1, p2})
-                    break
+        for p2 in unpaired:
+            if p2 not in st.session_state.players[p1]["opponents"]:
+                w, b = choose_colors(p1, p2)
+                pairings.append((w, b))
+                unpaired.remove(p2)
+                paired = True
+                break
+
+        # ---------------------------
+        # DEADLOCK RECOVERY (FORCE PAIR)
+        # ---------------------------
+        if not paired:
+            p2 = unpaired.pop(0)
+            w, b = choose_colors(p1, p2)
+            pairings.append((w, b))
 
     return pairings
+
 
 
 def apply_results(results):
