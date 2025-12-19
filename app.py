@@ -6,7 +6,7 @@ import os
 # ==========================================================
 # DATABASE
 # ==========================================================
-DATABASE_URL = "postgresql://neondb_owner:YOUR_PASSWORD@YOUR_HOST/neondb?sslmode=require"
+DATABASE_URL = "postgresql://neondb_owner:npg_Zws9OS4HVLRo@ep-mute-surf-ah6m7hju-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
