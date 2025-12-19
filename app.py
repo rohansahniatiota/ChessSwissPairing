@@ -74,6 +74,9 @@ def standings():
     df["sonneborn"] = df.apply(sonneborn, axis=1)
 
     return df.sort_values(
+        by=["score", "buchholz", "sonneborn", "rating"],
+        ascending=False
+    ).reset_index(drop=True)
 
 
 def choose_colors(p1, p2):
