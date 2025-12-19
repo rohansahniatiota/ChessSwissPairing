@@ -1,284 +1,275 @@
 import streamlit as st
 import pandas as pd
-import json
-from collections import defaultdict
-from itertools import combinations
+from sqlalchemy import create_engine, text
+import os
 
+# ==========================================================
+# DATABASE
+# ==========================================================
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql://neondb_owner:YOUR_PASSWORD@YOUR_HOST/neondb?sslmode=require"
+)
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+# ==========================================================
+# STREAMLIT CONFIG
+# ==========================================================
 st.set_page_config("Swiss Chess Tournament Manager", layout="wide")
-if "tournament" not in st.session_state:
-    st.session_state.tournament = {
-        "name": "Untitled Tournament",
-        "rounds": 0
-    }
+st.title("♟ Swiss Chess Tournament Manager (Professional)")
 
 # ==========================================================
-# Session State
+# DATABASE HELPERS
 # ==========================================================
-if "players" not in st.session_state:
-    st.session_state.players = {}
+def get_or_create_tournament(name):
+    with engine.begin() as conn:
+        t = conn.execute(
+            text("SELECT id FROM tournaments WHERE name=:n"),
+            {"n": name},
+        ).fetchone()
 
-if "rounds" not in st.session_state:
-    st.session_state.rounds = []
+        if t:
+            return t.id
 
-if "pair_history" not in st.session_state:
-    st.session_state.pair_history = set()
+        tid = conn.execute(
+            text("INSERT INTO tournaments (name) VALUES (:n) RETURNING id"),
+            {"n": name},
+        ).scalar()
+        return tid
 
-if "round_number" not in st.session_state:
-    st.session_state.round_number = 0
 
+def load_players(tid):
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT * FROM players WHERE tournament_id=:t"),
+            {"t": tid},
+        ).fetchall()
+
+    players = {}
+    for r in rows:
+        players[r.id] = dict(r._mapping)
+    return players
+
+
+def load_games(tid):
+    with engine.connect() as conn:
+        return conn.execute(
+            text("SELECT * FROM games WHERE tournament_id=:t"),
+            {"t": tid},
+        ).fetchall()
+
+
+def save_player(tid, name, rating, gender, age):
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO players (tournament_id, name, rating, gender, age)
+                VALUES (:t, :n, :r, :g, :a)
+            """),
+            {"t": tid, "n": name, "r": rating, "g": gender, "a": age},
+        )
+
+
+def save_game(tid, rnd, white, black, result):
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO games
+                (tournament_id, round, white_player, black_player, result)
+                VALUES (:t, :r, :w, :b, :res)
+            """),
+            {"t": tid, "r": rnd, "w": white, "b": black, "res": result},
+        )
+
+
+def update_color(pid, color):
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE players SET last_color=:c WHERE id=:p"),
+            {"c": color, "p": pid},
+        )
+
+
+def update_score(pid, delta):
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE players SET score = score + :d WHERE id=:p"),
+            {"d": delta, "p": pid},
+        )
 
 # ==========================================================
-# Core Helpers
+# PAIRING LOGIC
 # ==========================================================
-def add_player(name, rating, gender, age):
-    pid = len(st.session_state.players) + 1
-    st.session_state.players[pid] = {
-        "id": pid,
-        "name": name,
-        "rating": rating,
-        "gender": gender,
-        "age": age,
-        "score": 0.0,
-        "colors": [],
-        "opponents": [],
-        "results": {},
-        "bye": False
-    }
-
-
-
-def standings(final=False):
-    df = pd.DataFrame(st.session_state.players.values())
-
-    if df.empty:
-        return df
-
-    df["buchholz"] = df["opponents"].apply(
-        lambda ops: sum(st.session_state.players[o]["score"] for o in ops)
+def already_played(games, p1, p2):
+    return any(
+        {g.white_player, g.black_player} == {p1, p2}
+        for g in games
     )
 
-    df["sonneborn"] = df.apply(
-        lambda r: sum(
-            st.session_state.players[o]["score"] * r["results"].get(o, 0)
-            for o in r["opponents"]
-        ),
-        axis=1
-    )
 
-    # Direct encounter
-    def direct(row):
-        score = 0
-        for o, r in row["results"].items():
-            score += r
-        return score
-
-    df["direct"] = df.apply(direct, axis=1)
-
-    order = ["score", "buchholz", "sonneborn"]
-    if final:
-        order.append("direct")
-    order.append("rating")
-
-    return df.sort_values(
-        by=order,
-        ascending=False
-    ).reset_index(drop=True)
-
-
-
-def choose_colors(p1, p2):
-    # HARD CHECK: no repeat pairing
-    if p2 in st.session_state.players[p1]["opponents"]:
-        raise ValueError("Repeat pairing detected")
-
-    c1 = st.session_state.players[p1]["colors"]
-    c2 = st.session_state.players[p2]["colors"]
-
-    # Balance colors
-    if c1.count("W") > c1.count("B"):
+def choose_colors(p1, p2, players):
+    # STRICT: no same color as last round
+    if players[p1]["last_color"] == "W":
         return p2, p1
-    if c2.count("W") > c2.count("B"):
+    if players[p2]["last_color"] == "W":
         return p1, p2
-
     return p1, p2
 
 
-
-def swiss_pair():
-    players_sorted = standings()["id"].tolist()
-    unpaired = players_sorted.copy()
+def swiss_pair(players, games):
     pairings = []
+    used = set()
 
-    # ---------------- BYE ----------------
-    if len(unpaired) % 2 == 1:
-        for pid in reversed(unpaired):
-            if not st.session_state.players[pid]["bye"]:
-                st.session_state.players[pid]["bye"] = True
-                st.session_state.players[pid]["score"] += 1
+    ordered = sorted(
+        players.values(),
+        key=lambda p: (-p["score"], -p["rating"])
+    )
+
+    ids = [p["id"] for p in ordered]
+
+    # BYE
+    if len(ids) % 2 == 1:
+        for pid in reversed(ids):
+            if not players[pid]["bye"]:
+                players[pid]["bye"] = True
+                update_score(pid, 1)
                 pairings.append((pid, None))
-                unpaired.remove(pid)
+                used.add(pid)
                 break
 
-    # ---------------- PAIRING ----------------
-    while len(unpaired) >= 2:
-        p1 = unpaired.pop(0)
-        found = False
+    for i, p1 in enumerate(ids):
+        if p1 in used:
+            continue
 
-        for p2 in unpaired:
-            if p2 not in st.session_state.players[p1]["opponents"]:
-                w, b = choose_colors(p1, p2)
-                pairings.append((w, b))
-                unpaired.remove(p2)
-                found = True
-                break
+        for p2 in ids[i + 1:]:
+            if p2 in used:
+                continue
+            if already_played(games, p1, p2):
+                continue
 
-        # FORCE PAIR ONLY IF NO REPEAT EXISTS
-        if not found:
-            raise RuntimeError(
-                f"No valid pairing possible for {st.session_state.players[p1]['name']}"
-            )
+            w, b = choose_colors(p1, p2, players)
+            pairings.append((w, b))
+            used.update({p1, p2})
+            break
+        else:
+            raise RuntimeError("No valid Swiss pairing possible")
 
     return pairings
 
-
-
-def apply_results(results):
-    for w, b, r in results:
-        if b is None:
-            continue
-
-        st.session_state.players[w]["colors"].append("W")
-        st.session_state.players[b]["colors"].append("B")
-
-        st.session_state.players[w]["opponents"].append(b)
-        st.session_state.players[b]["opponents"].append(w)
-
-        if r == "1-0":
-            st.session_state.players[w]["score"] += 1
-            st.session_state.players[w]["results"][b] = 1
-            st.session_state.players[b]["results"][w] = 0
-        elif r == "0-1":
-            st.session_state.players[b]["score"] += 1
-            st.session_state.players[w]["results"][b] = 0
-            st.session_state.players[b]["results"][w] = 1
-        else:
-            st.session_state.players[w]["score"] += 0.5
-            st.session_state.players[b]["score"] += 0.5
-            st.session_state.players[w]["results"][b] = 0.5
-            st.session_state.players[b]["results"][w] = 0.5
-
-
 # ==========================================================
-# UI
+# UI TABS
 # ==========================================================
-st.title("♟ Swiss Chess Tournament Manager (Professional)")
+tabs = st.tabs(["Players", "Rounds", "Standings"])
 
-tabs = st.tabs(["Players", "Rounds", "Standings", "Save / Load"])
-
-# ---------------- Players ----------------
+# ---------------- PLAYERS ----------------
 with tabs[0]:
-    st.subheader("Tournament Details")
-    st.session_state.tournament["name"] = st.text_input(
-        "Tournament Name",
-        st.session_state.tournament["name"]
-    )
+    tname = st.text_input("Tournament Name", "Untitled Tournament")
+    tid = get_or_create_tournament(tname)
 
-    st.divider()
     st.subheader("Add Player")
-
     c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 1, 1])
     name = c1.text_input("Name")
     rating = c2.number_input("Rating", 0, 3000, 1200)
     gender = c3.selectbox("Gender", ["Male", "Female", "Other"])
     age = c4.number_input("Age", 5, 100, 18)
 
-    if c5.button("Add"):
-        if name:
-            add_player(name, rating, gender, age)
+    if c5.button("Add Player"):
+        save_player(tid, name, rating, gender, age)
+        st.rerun()
 
-    if st.session_state.players:
+    players = load_players(tid)
+    if players:
+        df_players = pd.DataFrame(players.values()).reset_index(drop=True)
+
+        # ✅ Player numbering starts from 1
+        df_players.insert(0, "No", range(1, len(df_players) + 1))
+        
         st.dataframe(
-            pd.DataFrame(st.session_state.players.values())[
-                ["name", "rating", "gender", "age", "score"]
-            ],
-            use_container_width=True
+            df_players[["No", "name", "rating", "gender", "age", "score"]],
+            use_container_width=True,
         )
 
 
-# ---------------- Rounds ----------------
+# ---------------- ROUNDS ----------------
 with tabs[1]:
-    if len(st.session_state.players) < 2:
+    players = load_players(tid)
+    games = load_games(tid)
+
+    if len(players) < 2:
         st.warning("Add at least 2 players")
     else:
         if st.button("Generate Next Round"):
-            st.session_state.round_number += 1
-            st.session_state.rounds.append(swiss_pair())
+            round_no = (max([g.round for g in games]) + 1) if games else 1
+            pairings = swiss_pair(players, games)
+            st.session_state.current_pairings = (round_no, pairings)
 
-        if st.session_state.rounds:
-            st.markdown(f"### Round {st.session_state.round_number}")
+        if "current_pairings" in st.session_state:
+            rnd, pairings = st.session_state.current_pairings
+            st.markdown(f"### Round {rnd}")
+
             results = []
-            for i, (w, b) in enumerate(st.session_state.rounds[-1]):
+            for board_no, (w, b) in enumerate(pairings, start=1):
+                st.markdown(f"**Board {board_no}**")
+            
                 if b is None:
-                    st.write(f"**{st.session_state.players[w]['name']}** receives BYE")
+                    st.write(f"{players[w]['name']} gets BYE")
                     continue
 
+
                 c1, c2, c3 = st.columns([3, 3, 2])
-                c1.write(f"⚪ {st.session_state.players[w]['name']}")
-                c2.write(f"⚫ {st.session_state.players[b]['name']}")
-                res = c3.selectbox("Result", ["1-0", "½-½", "0-1"], key=i)
+                c1.write(f"⚪ {players[w]['name']}")
+                c2.write(f"⚫ {players[b]['name']}")
+                res = c3.selectbox(
+                    "Result",
+                    ["1-0", "½-½", "0-1"],
+                    key=f"{w}-{b}"
+                )
                 results.append((w, b, res))
 
             if st.button("Submit Results"):
-                apply_results(results)
-                st.success("Results recorded")
+                for w, b, r in results:
+                    save_game(tid, rnd, w, b, r)
+                    update_color(w, "W")
+                    update_color(b, "B")
 
-# ---------------- Standings ----------------
+                    if r == "1-0":
+                        update_score(w, 1)
+                    elif r == "0-1":
+                        update_score(b, 1)
+                    else:
+                        update_score(w, 0.5)
+                        update_score(b, 0.5)
+
+                del st.session_state.current_pairings
+                st.success("Round saved")
+                st.rerun()
+
+# ---------------- STANDINGS ----------------
 with tabs[2]:
-    st.subheader("Standings")
-    if st.button("Finalize Tournament"):
-        st.success("Final standings calculated with tie-breaks")
-        final_df = standings(final=True)
+    players = load_players(tid)
+    games = load_games(tid)
+
+    if players:
+        df = pd.DataFrame(players.values())
+
+        def buchholz(pid):
+            opps = [
+                g.black_player if g.white_player == pid else g.white_player
+                for g in games
+                if pid in (g.white_player, g.black_player)
+            ]
+            return sum(players[o]["score"] for o in opps)
+
+        df["buchholz"] = df["id"].apply(buchholz)
+
+        df = df.sort_values(
+            by=["score", "buchholz", "rating"],
+            ascending=False
+        )
+        
         st.dataframe(
-            final_df[
-                ["name", "rating", "gender", "age", "score", "buchholz", "sonneborn"]
-            ],
-            use_container_width=True
-        )
-        csv = final_df.to_csv(index=False).encode()
-        st.download_button("Export Standings CSV", csv, "standings.csv")
-
-
-    # df = standings()
-    # if df.empty:
-    #     st.info("No rounds played yet.")
-    # else:
-    #     st.dataframe(
-    #         df[["name", "rating", "score", "buchholz", "sonneborn"]],
-    #         use_container_width=True
-    #     )
-
-
-    
-# ---------------- Save / Load ----------------
-with tabs[3]:
-    st.subheader("Save / Load Tournament")
-
-    if st.button("Save Tournament"):
-        data = {
-            "players": st.session_state.players,
-            "rounds": st.session_state.rounds,
-            "round_number": st.session_state.round_number
-        }
-        st.download_button(
-            "Download JSON",
-            json.dumps(data, indent=2),
-            "tournament.json"
+            df[["name", "rating", "gender", "age", "score", "buchholz"]],
+            use_container_width=True,
         )
 
-    uploaded = st.file_uploader("Load Tournament JSON")
-    if uploaded:
-        data = json.load(uploaded)
-        st.session_state.players = data["players"]
-        st.session_state.rounds = data["rounds"]
-        st.session_state.round_number = data["round_number"]
-        st.success("Tournament loaded successfully")
